@@ -1,0 +1,402 @@
+Kubernetes HPA Evaluation
+=========================
+COEN/MSEN 243 Cloud Computing — Santa Clara University
+Team: Lauren Hu, Sriram Madduri, Kehan Chen
+
+Evaluates Kubernetes Horizontal Pod Autoscaler (HPA) performance under variable
+workloads by comparing a fixed 3-replica deployment against a HPA-managed
+1–10 replica deployment.
+
+--------------------------------------------------------------------------------
+PREREQUISITES
+--------------------------------------------------------------------------------
+
+  Local demo (no cloud account needed):
+    - Docker Desktop (https://www.docker.com/products/docker-desktop)
+    - Minikube (https://minikube.sigs.k8s.io/docs/start/)
+    - kubectl (https://kubernetes.io/docs/tasks/tools/)
+    - Python 3.11+
+    - pip packages: locust, numpy, matplotlib
+
+  GKE deployment (full cloud path):
+    - All of the above
+    - Google Cloud SDK (gcloud CLI, authenticated)
+    - A GCP project with billing enabled
+
+  Install Python dependencies:
+    pip install locust numpy matplotlib
+
+--------------------------------------------------------------------------------
+1. PROJECT OVERVIEW
+--------------------------------------------------------------------------------
+
+Directory structure:
+
+  app/                  FastAPI application + Dockerfile
+    main.py             REST API with CPU-intensive /cpu endpoint
+    requirements.txt
+    Dockerfile
+
+  k8s/                  Kubernetes manifests
+    namespace.yaml
+    deployment-fixed.yaml     3 static replicas (baseline)
+    deployment-hpa.yaml       1 starting replica (HPA manages it)
+    hpa.yaml                  HPA: 1-10 replicas, 60% CPU target
+    service.yaml
+    prometheus/               Prometheus deployment
+
+  locust/
+    locustfile.py       Phased load test: ramp-up/spike/sustained/recovery
+
+  analysis/
+    simulate_results.py Generates synthetic demo data (no cluster needed)
+    collect_metrics.py  Queries real Prometheus, exports CSV
+    analyze_results.py  Statistical analysis + 4 Matplotlib figures
+
+  sample_data/          Output CSVs and figures go here
+  scripts/              Deploy and run scripts
+  paper/                Final paper (Sections 1-10)
+
+--------------------------------------------------------------------------------
+2. QUICK DEMO (no cluster required)
+--------------------------------------------------------------------------------
+
+  To instantly generate all figures using synthetic data:
+
+    cd /path/to/cloud-computing-kubernetes-hpa
+    python3 analysis/simulate_results.py
+    python3 analysis/analyze_results.py
+
+  Figures will be written to sample_data/figures/:
+    - latency_comparison.png
+    - throughput_comparison.png
+    - cpu_replicas.png
+    - cost_performance.png
+
+  A statistical summary table is printed to stdout.
+
+--------------------------------------------------------------------------------
+3. LOCAL DEMO WITH MINIKUBE
+--------------------------------------------------------------------------------
+
+  Step 1: Deploy everything to Minikube
+    bash scripts/deploy_local.sh
+
+  Step 2: Note the NodePort IP from the deploy output, e.g.:
+    MINIKUBE_IP=$(minikube ip)
+    HPA_PORT=$(kubectl get svc hpa-eval-hpa-svc -n hpa-eval \
+        -o jsonpath='{.spec.ports[0].nodePort}')
+
+  Step 3: Run the load test (in a separate terminal)
+    locust -f locust/locustfile.py \
+        --host http://$MINIKUBE_IP:$HPA_PORT \
+        --headless --users 200 --spawn-rate 10 --run-time 18m
+
+  Step 4: Watch HPA scale (in another terminal)
+    kubectl get hpa -n hpa-eval -w
+
+  Step 5: Port-forward Prometheus to collect metrics
+    kubectl port-forward svc/prometheus 9090:9090 -n hpa-eval &
+
+  Step 6: Collect metrics after experiment
+    python3 analysis/collect_metrics.py --mode hpa \
+        --prometheus-url http://localhost:9090
+
+  Step 7: Analyze and plot
+    python3 analysis/analyze_results.py
+
+--------------------------------------------------------------------------------
+4. GKE DEPLOYMENT
+--------------------------------------------------------------------------------
+
+  Deploy to Google Cloud (creates a 3-node e2-standard-2 cluster):
+
+    bash scripts/deploy_gke.sh YOUR_PROJECT_ID us-central1
+
+  This will:
+    1. Enable required GCP APIs
+    2. Create GKE cluster hpa-eval-cluster
+    3. Build and push Docker image to GCR
+    4. Apply all Kubernetes manifests
+    5. Wait for pods to be ready
+    6. Print external IP addresses
+
+  To run both experiments sequentially and collect results:
+    bash scripts/run_experiment.sh
+
+  To delete the cluster when done (avoid ongoing charges):
+    gcloud container clusters delete hpa-eval-cluster --region us-central1
+
+--------------------------------------------------------------------------------
+5. RUNNING LOAD TESTS
+--------------------------------------------------------------------------------
+
+  The Locust load test implements a 4-phase shape:
+
+    Phase       Time      Users      Spawn Rate
+    Ramp-up     0-3 min   1→50       5/s
+    Spike       3-6 min   50→200     50/s  (sudden burst)
+    Sustained   6-15 min  ~150       -     (held steady)
+    Recovery    15-18 min 150→10     10/s
+
+  Traffic mix: 80% CPU-intensive (/cpu?intensity=medium), 20% health checks (/)
+
+  Headless run:
+    locust -f locust/locustfile.py --host http://SERVICE_IP \
+        --headless --users 200 --spawn-rate 10 --run-time 18m
+
+  Web UI (open http://localhost:8089 in browser):
+    locust -f locust/locustfile.py --host http://SERVICE_IP
+
+--------------------------------------------------------------------------------
+6. COLLECTING AND ANALYZING RESULTS
+--------------------------------------------------------------------------------
+
+  Collect from live Prometheus (requires port-forward to be active):
+    python3 analysis/collect_metrics.py --mode fixed --prometheus-url http://localhost:9090
+    python3 analysis/collect_metrics.py --mode hpa   --prometheus-url http://localhost:9090
+
+  Generate figures from collected (or simulated) data:
+    python3 analysis/analyze_results.py
+
+  Custom CSV paths:
+    python3 analysis/analyze_results.py \
+        --fixed path/to/fixed_metrics.csv \
+        --hpa   path/to/hpa_metrics.csv
+
+  Output figures:
+    sample_data/figures/latency_comparison.png
+    sample_data/figures/throughput_comparison.png
+    sample_data/figures/cpu_replicas.png
+    sample_data/figures/cost_performance.png
+
+--------------------------------------------------------------------------------
+7. APPLICATION ENDPOINTS
+--------------------------------------------------------------------------------
+
+  GET /             Lightweight health check, returns status + hostname
+  GET /cpu          CPU-intensive endpoint (computes prime numbers)
+                    ?intensity=low|medium|high  (1k/5k/20k primes)
+  GET /health       Kubernetes liveness/readiness probe
+  GET /metrics      Prometheus text exposition
+
+  Example:
+    curl http://SERVICE_IP/cpu?intensity=medium
+
+--------------------------------------------------------------------------------
+8. SOURCE CODE (per 2024 IT policy — all Python code pasted inline)
+--------------------------------------------------------------------------------
+
+--- app/main.py ---
+
+import os, time, socket, math
+from typing import Literal
+from fastapi import FastAPI, Query
+from fastapi.responses import PlainTextResponse
+import psutil
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+
+app = FastAPI(title="HPA Evaluation App", version="1.0.0")
+
+REQUEST_COUNT = Counter("app_requests_total", "Total requests", ["method","endpoint","status_code"])
+REQUEST_LATENCY = Histogram("app_request_latency_seconds", "Request latency",
+    ["endpoint"], buckets=[0.005,0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5,5.0,10.0])
+ACTIVE_REQUESTS = Gauge("app_active_requests", "Active requests")
+CPU_USAGE = Gauge("app_cpu_usage_percent", "CPU usage percent")
+
+INTENSITY_MAP = {"low": 1000, "medium": 5000, "high": 20000}
+
+def compute_primes(n):
+    primes = []
+    candidate = 2
+    while len(primes) < n:
+        if all(candidate % p != 0 for p in primes if p <= math.isqrt(candidate)):
+            primes.append(candidate)
+        candidate += 1
+    return primes
+
+@app.get("/")
+async def root():
+    CPU_USAGE.set(psutil.cpu_percent(interval=None))
+    return {"status": "ok", "hostname": socket.gethostname(), "version": "1.0.0"}
+
+@app.get("/cpu")
+async def cpu_load(intensity: Literal["low","medium","high"] = Query("medium")):
+    n = INTENSITY_MAP[intensity]
+    ACTIVE_REQUESTS.inc()
+    start = time.perf_counter()
+    try:
+        primes = compute_primes(n)
+        elapsed = time.perf_counter() - start
+        REQUEST_COUNT.labels(method="GET", endpoint="/cpu", status_code=200).inc()
+        REQUEST_LATENCY.labels(endpoint="/cpu").observe(elapsed)
+        CPU_USAGE.set(psutil.cpu_percent(interval=None))
+        return {"intensity": intensity, "primes_computed": n, "largest_prime": primes[-1],
+                "elapsed_seconds": round(elapsed, 4), "hostname": socket.gethostname()}
+    finally:
+        ACTIVE_REQUESTS.dec()
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "hostname": socket.gethostname()}
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    CPU_USAGE.set(psutil.cpu_percent(interval=None))
+    return PlainTextResponse(generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
+
+
+--- locust/locustfile.py ---
+
+from locust import HttpUser, task, between, LoadTestShape
+
+class HPAEvalUser(HttpUser):
+    wait_time = between(0.5, 2.0)
+
+    @task(1)
+    def health_check(self):
+        self.client.get("/")
+
+    @task(4)
+    def cpu_load(self):
+        self.client.get("/cpu?intensity=medium", name="/cpu?intensity=medium")
+
+class PhasedLoadShape(LoadTestShape):
+    # (cumulative_end_seconds, target_users, spawn_rate)
+    stages = [
+        (0,    1,   5),
+        (180,  50,  5),
+        (360,  200, 50),
+        (900,  150, 10),
+        (1080, 10,  10),
+    ]
+
+    def tick(self):
+        run_time = self.get_run_time()
+        for i, (end_time, users, spawn_rate) in enumerate(self.stages):
+            if run_time <= end_time or i == len(self.stages) - 1:
+                if i == 0:
+                    return (users, spawn_rate)
+                if run_time > end_time:
+                    return (users, spawn_rate)
+                return (users, spawn_rate)
+        return None
+
+
+--- analysis/simulate_results.py ---
+
+import os, math, csv
+import numpy as np
+from datetime import datetime, timedelta
+
+rng = np.random.default_rng(42)
+STEP_SECONDS = 15
+TOTAL_SECONDS = 18 * 60
+TIMESTAMPS = list(range(0, TOTAL_SECONDS + 1, STEP_SECONDS))
+N = len(TIMESTAMPS)
+BASE_TIME = datetime(2026, 3, 17, 10, 0, 0)
+
+def ts_to_datetime(t):
+    return (BASE_TIME + timedelta(seconds=t)).isoformat()
+
+def load_at(t):
+    if t <= 180:   return t / 180 * 0.25
+    elif t <= 360: return 0.25 + (t - 180) / 180 * 0.75
+    elif t <= 900: return 1.0 - (t - 360) / 540 * 0.25
+    else:          return max(0.05, 0.75 - (t - 900) / 180 * 0.70)
+
+FIELDNAMES = ["timestamp","elapsed_seconds","experiment","replicas",
+              "cpu_utilization_pct","latency_p50_ms","latency_p95_ms",
+              "latency_p99_ms","rps","error_rate","active_users"]
+
+def simulate_fixed():
+    rows = []
+    for t in TIMESTAMPS:
+        load = load_at(t)
+        replicas = 3
+        cpu_per_pod = min(95.0, load * 100.0 / replicas * 3.3)
+        cpu_pct = float(np.clip(cpu_per_pod + rng.normal(0, 2.0), 0, 100))
+        s = cpu_per_pod / 100.0
+        p50 = 80 + 60 + (s - 0.6)**2 * 3000 if s >= 0.6 else 80 + s * 100
+        p50 += rng.normal(0, p50 * 0.05)
+        p95 = p50 * (1.5 + s * 0.8) + rng.normal(0, p50 * 0.08)
+        p99 = p95 * (1.3 + s * 0.5) + rng.normal(0, p95 * 0.08)
+        p50 = float(max(50, p50)); p95 = float(max(p50*1.2, p95)); p99 = float(max(p95*1.1, p99))
+        rps = float(max(0, min(load * 150, replicas * 12.0) + rng.normal(0, 1.5)))
+        err = float(np.clip((cpu_per_pod-85)/15*0.12 if cpu_per_pod > 85 else 0.001, 0, 1))
+        rows.append({"timestamp": ts_to_datetime(t), "elapsed_seconds": t, "experiment": "fixed",
+                     "replicas": replicas, "cpu_utilization_pct": round(cpu_pct, 2),
+                     "latency_p50_ms": round(p50,1), "latency_p95_ms": round(p95,1),
+                     "latency_p99_ms": round(p99,1), "rps": round(rps,2),
+                     "error_rate": round(err,4), "active_users": int(load*200)})
+    return rows
+
+def simulate_hpa():
+    rows = []
+    current_replicas = 1.0
+    target_replicas = 1.0
+    for i, t in enumerate(TIMESTAMPS):
+        load = load_at(t)
+        desired = max(1, min(10, math.ceil(load * 12 / 0.60)))
+        if desired > current_replicas and t >= 90:
+            past_desired = max(1, min(10, math.ceil(load_at(max(0, t-90)) * 12 / 0.60)))
+            target_replicas = past_desired
+        elif desired <= current_replicas and i >= 4:
+            future_max = max(load_at(TIMESTAMPS[min(i+j, N-1)]) for j in range(4))
+            target_replicas = max(desired, max(1, min(10, math.ceil(future_max * 12 / 0.60))))
+        current_replicas = 0.3 * target_replicas + 0.7 * current_replicas
+        replica_count = max(1, round(current_replicas))
+        cpu_per_pod = min(90.0, load * 100.0 / replica_count * 3.3)
+        cpu_pct = float(np.clip(cpu_per_pod + rng.normal(0, 2.0), 0, 100))
+        s = cpu_per_pod / 100.0
+        p50 = 80 + 48 + (s-0.6)**2 * 1500 if s >= 0.6 else 80 + s * 80
+        p50 += rng.normal(0, p50 * 0.05)
+        p95 = p50 * (1.4 + s * 0.5) + rng.normal(0, p50 * 0.06)
+        p99 = p95 * (1.25 + s * 0.3) + rng.normal(0, p95 * 0.07)
+        p50 = float(max(50, p50)); p95 = float(max(p50*1.2, p95)); p99 = float(max(p95*1.1, p99))
+        rps = float(max(0, min(load * 150, replica_count * 12.0) + rng.normal(0, 1.5)))
+        err = float(np.clip(0.001 if cpu_per_pod < 80 else (cpu_per_pod-80)/20*0.05, 0, 1))
+        rows.append({"timestamp": ts_to_datetime(t), "elapsed_seconds": t, "experiment": "hpa",
+                     "replicas": replica_count, "cpu_utilization_pct": round(cpu_pct, 2),
+                     "latency_p50_ms": round(p50,1), "latency_p95_ms": round(p95,1),
+                     "latency_p99_ms": round(p99,1), "rps": round(rps,2),
+                     "error_rate": round(err,4), "active_users": int(load*200)})
+    return rows
+
+def write_csv(rows, filename):
+    path = os.path.join(os.path.dirname(__file__), "..", "sample_data", filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader(); writer.writerows(rows)
+    print(f"  Wrote {len(rows)} rows -> {path}")
+
+if __name__ == "__main__":
+    print("Generating synthetic experiment data...")
+    write_csv(simulate_fixed(), "fixed_metrics.csv")
+    write_csv(simulate_hpa(), "hpa_metrics.csv")
+    print("Done.")
+
+
+--- analysis/analyze_results.py ---
+
+(see analysis/analyze_results.py — full source, 260 lines)
+Generates 4 figures: latency_comparison.png, throughput_comparison.png,
+cpu_replicas.png, cost_performance.png
+Prints statistical summary table.
+
+
+--- analysis/collect_metrics.py ---
+
+(see analysis/collect_metrics.py — full source, 130 lines)
+Queries Prometheus HTTP API for real experiment data.
+Usage: python3 analysis/collect_metrics.py --mode fixed|hpa --prometheus-url URL
+
+
+--------------------------------------------------------------------------------
+CONTACT
+--------------------------------------------------------------------------------
+
+  Lauren Hu      — lhu@scu.edu
+  Sriram Madduri — smadduri@scu.edu
+  Kehan Chen     — kchen@scu.edu
