@@ -176,23 +176,23 @@ The implementation follows a four-layer architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  LOAD GENERATION LAYER                                   │
+│  LOAD GENERATION LAYER                                  │
 │  Locust (locustfile.py) — phased load shape             │
 └────────────────────────┬────────────────────────────────┘
                          │ HTTP
 ┌────────────────────────▼────────────────────────────────┐
-│  APPLICATION LAYER                                       │
+│  APPLICATION LAYER                                      │
 │  FastAPI (main.py) — CPU endpoints + Prometheus metrics │
 │  Deployed as Kubernetes Deployment (fixed or HPA)       │
 └────────────────────────┬────────────────────────────────┘
                          │ /metrics scrape (15s)
 ┌────────────────────────▼────────────────────────────────┐
-│  OBSERVABILITY LAYER                                     │
+│  OBSERVABILITY LAYER                                    │
 │  Prometheus — time-series metrics storage               │
 └────────────────────────┬────────────────────────────────┘
                          │ HTTP API
 ┌────────────────────────▼────────────────────────────────┐
-│  ANALYSIS LAYER                                          │
+│  ANALYSIS LAYER                                         │
 │  collect_metrics.py → CSV export                        │
 │  analyze_results.py → Matplotlib figures + statistics   │
 └─────────────────────────────────────────────────────────┘
@@ -202,33 +202,33 @@ The implementation follows a four-layer architecture:
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │              GKE Cluster                          │
-                    │                                                    │
-  ┌──────────┐      │  ┌─────────────────┐   ┌─────────────────────┐  │
-  │  Locust  │──────┼──▶  hpa-eval-fixed │   │  hpa-eval-hpa       │  │
-  │  Load    │      │  │  (3 replicas)   │   │  (1→10 replicas)    │  │
-  │  Generator│     │  └────────┬────────┘   └──────────┬──────────┘  │
-  └──────────┘      │           │                        │              │
-                    │           │ /metrics               │ /metrics     │
-                    │           └──────────┬─────────────┘              │
-                    │                      ▼                             │
-                    │           ┌──────────────────┐                    │
-                    │           │   Prometheus     │                    │
-                    │           │   (port 9090)    │                    │
-                    │           └──────────┬───────┘                    │
-                    │                      │                             │
-                    │    ┌─────────────────┤  metrics-server             │
-                    │    │  HPA Controller │◀────────────────────────── │
-                    │    │  (kube-system)  │  (CPU utilization)         │
-                    │    └─────────────────┘                             │
+                    │              GKE Cluster                         │
+                    │                                                  │
+  ┌──────────┐      │  ┌─────────────────┐   ┌─────────────────────┐   │
+  │ Locust   │──────┼──▶  hpa-eval-fixed │   │  hpa-eval-hpa       │   │
+  │ Load     │      │  │  (3 replicas)   │   │  (1→10 replicas)    │   │
+  │ Generator│      │  └────────┬────────┘   └───────────┬─────────┘   │
+  └──────────┘      │           │                        │             │
+                    │           │ /metrics               │ /metrics    │
+                    │           └──────────┬─────────────┘             │
+                    │                      ▼                           │
+                    │           ┌──────────────────┐                   │
+                    │           │   Prometheus     │                   │
+                    │           │   (port 9090)    │                   │
+                    │           └──────────┬───────┘                   │
+                    │                      │                           |
+                    │    ┌─────────────────┤  metrics-server           │
+                    │    │  HPA Controller │◀──────────────────────────│
+                    │    │  (kube-system)  │  (CPU utilization)        │
+                    │    └─────────────────┘                           │
                     └──────────────────────────────────────────────────┘
                                            │
                                     port-forward
                                            │
                               ┌────────────▼───────────┐
-                              │  Analysis (local)       │
-                              │  collect_metrics.py     │
-                              │  analyze_results.py     │
+                              │  Analysis (local)      │
+                              │  collect_metrics.py    │
+                              │  analyze_results.py    │
                               └────────────────────────┘
 ```
 
@@ -236,8 +236,8 @@ The implementation follows a four-layer architecture:
 
 ```
                     ┌─────────────────────────────────────┐
-                    │         HPA Control Loop             │
-                    │         (runs every 15s)             │
+                    │         HPA Control Loop            │
+                    │         (runs every 15s)            │
                     └──────────────┬──────────────────────┘
                                    │
                     ┌──────────────▼──────────────────────┐
@@ -260,9 +260,9 @@ The implementation follows a four-layer architecture:
                          ┌─────────┴─────────┐
                          ▼                   ▼
               ┌────────────────┐   ┌──────────────────┐
-              │ Scale Up?      │   │ Scale Down?       │
-              │ kubectl scale  │   │ Wait for window   │
-              │ replicas++     │   │ then scale--      │
+              │ Scale Up?      │   │ Scale Down?      │
+              │ kubectl scale  │   │ Wait for window  │
+              │ replicas++     │   │ then scale--     │
               └────────────────┘   └──────────────────┘
 ```
 
@@ -311,7 +311,7 @@ Deploy infrastructure
          → 4 figures + stats
                │
                ▼
-END
+              END
 ```
 
 ### 6.5 Key Implementation Decisions

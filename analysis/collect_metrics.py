@@ -27,30 +27,26 @@ import json
 # PromQL expressions keyed by metric name
 QUERIES = {
     "cpu_utilization_pct": (
-        'avg(rate(container_cpu_usage_seconds_total{namespace="hpa-eval", '
-        'container="hpa-eval-app"}[1m])) * 100'
+        'avg(app_cpu_usage_percent)'
     ),
     "replicas": (
-        'kube_deployment_status_replicas_available{namespace="hpa-eval"}'
+        'count(count by (instance)(app_requests_total))'
     ),
     "latency_p50_ms": (
-        'histogram_quantile(0.50, sum(rate(app_request_latency_seconds_bucket'
-        '{namespace="hpa-eval"}[1m])) by (le)) * 1000'
+        'histogram_quantile(0.50, sum(rate(app_request_latency_seconds_bucket[1m])) by (le)) * 1000'
     ),
     "latency_p95_ms": (
-        'histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket'
-        '{namespace="hpa-eval"}[1m])) by (le)) * 1000'
+        'histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket[1m])) by (le)) * 1000'
     ),
     "latency_p99_ms": (
-        'histogram_quantile(0.99, sum(rate(app_request_latency_seconds_bucket'
-        '{namespace="hpa-eval"}[1m])) by (le)) * 1000'
+        'histogram_quantile(0.99, sum(rate(app_request_latency_seconds_bucket[1m])) by (le)) * 1000'
     ),
     "rps": (
-        'sum(rate(app_requests_total{namespace="hpa-eval", status_code="200"}[1m]))'
+        'sum(rate(app_requests_total{status_code="200"}[1m]))'
     ),
     "error_rate": (
-        'sum(rate(app_requests_total{namespace="hpa-eval", status_code!="200"}[1m])) / '
-        'sum(rate(app_requests_total{namespace="hpa-eval"}[1m]))'
+        'sum(rate(app_requests_total{status_code!="200"}[1m])) / '
+        'sum(rate(app_requests_total[1m]))'
     ),
 }
 
