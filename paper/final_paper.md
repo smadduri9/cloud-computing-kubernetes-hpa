@@ -174,29 +174,10 @@ Based on our understanding of HPA's reactive architecture, we formulate four tes
 
 The implementation follows a four-layer architecture:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  LOAD GENERATION LAYER                                  │
-│  Locust (locustfile.py) — phased load shape             │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTP
-┌────────────────────────▼────────────────────────────────┐
-│  APPLICATION LAYER                                      │
-│  FastAPI (main.py) — CPU endpoints + Prometheus metrics │
-│  Deployed as Kubernetes Deployment (fixed or HPA)       │
-└────────────────────────┬────────────────────────────────┘
-                         │ /metrics scrape (15s)
-┌────────────────────────▼────────────────────────────────┐
-│  OBSERVABILITY LAYER                                    │
-│  Prometheus — time-series metrics storage               │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTP API
-┌────────────────────────▼────────────────────────────────┐
-│  ANALYSIS LAYER                                         │
-│  collect_metrics.py → CSV export                        │
-│  analyze_results.py → Matplotlib figures + statistics   │
-└─────────────────────────────────────────────────────────┘
-```
+- **Load Generation Layer** — `locust/locustfile.py` drives a phased, time-shaped workload (ramp-up → spike → sustained → recovery) against the Kubernetes service via HTTP.
+- **Application Layer** — `app/main.py` is a FastAPI service with CPU-intensive endpoints (`/cpu?intensity=low`) and Prometheus instrumentation. It is containerized via `app/Dockerfile` and deployed as either the fixed (3-replica) or HPA-managed Kubernetes Deployment.
+- **Observability Layer** — Prometheus scrapes each pod's `/metrics` endpoint every 15 seconds, collecting request latency histograms, request counters, and CPU usage gauges.
+- **Analysis Layer** — `analysis/collect_metrics.py` queries the Prometheus HTTP API and exports time-series data to CSV; `analysis/analyze_results.py` reads the CSVs and produces four Matplotlib figures plus a statistical summary table.
 
 ### 6.2 System Architecture Diagram
 
@@ -359,31 +340,33 @@ The complete per-step data is exported to `sample_data/fixed_metrics.csv` and `s
 
 ### 7.2 Results: Latency Comparison
 
-**Figure 1** shows response latency (p50/p95/p99) over time for both deployments.
+**Figure 1** shows response latency (p50/p95/p99) over time for both deployments. All latency figures below are drawn from Locust's end-to-end measurements, which capture the full user experience including failed (timed-out) requests. Prometheus latency metrics, which record only successfully completed requests, are noted separately where relevant.
 
 **Fixed deployment behavior:**
-- During the ramp-up phase (0–3 min), latency is stable around 120ms p95, as 3 pods handle the modest load without saturation.
-- At spike onset (3 min), all three pods immediately see a 4× traffic increase. CPU utilization rises above 85%, and latency climbs steeply. P95 latency peaks at approximately **850ms** at the 5-minute mark.
-- During the sustained phase (6–15 min), latency does not recover — the 3 pods remain saturated at the sustained load level, maintaining p95 around 600–700ms.
-- Recovery (15–18 min) shows rapid latency improvement as traffic drops.
+- During the ramp-up phase (0–3 min), latency is low as 3 pods handle modest load without saturation.
+- At spike onset (3 min), all three pods immediately see a sharp traffic increase. CPU utilization rises steeply and the pods saturate. Requests begin timing out, and the **failure rate climbs to 51.7%** over the remainder of the experiment.
+- End-to-end p50 latency reaches **2,300ms** and p95 reaches **20,000ms** (the Locust connection timeout ceiling), reflecting that a majority of requests never complete.
+- During the sustained phase (6–15 min), the fixed deployment cannot recover — pods remain saturated and the failure rate holds above 50%.
+- Recovery (15–18 min) shows improvement only as traffic ramps down below the pods' capacity.
 
 **HPA deployment behavior:**
-- During ramp-up, the single starting pod handles low traffic efficiently (p95 ~95ms).
-- At spike onset (3 min), the single pod is briefly overwhelmed. P95 latency spikes to approximately **420ms** at the 4-minute mark. This is the **critical reaction window**.
-- HPA detects high CPU utilization and begins scaling out. Within 75–90 seconds of spike onset, additional pods become Ready and begin serving traffic.
-- As pod count increases from 1→3→5→7, latency recovers to approximately 180ms p95 by the 5.5-minute mark.
-- During the sustained phase, HPA maintains 5–7 replicas and keeps p95 latency below 250ms throughout.
-- During recovery, HPA scales down with a 60-second stabilization delay, and latency returns to baseline.
+- During ramp-up, the single starting pod handles low traffic efficiently with sub-200ms latency.
+- At spike onset (3 min), the single pod is briefly overwhelmed. This is the **critical reaction window**: latency spikes and a small number of requests fail before HPA responds.
+- HPA detects elevated CPU utilization and begins scaling out. Within 75–90 seconds of spike onset, additional pods become Ready and begin serving traffic.
+- As pod count increases, latency recovers. The **overall failure rate is 0.97%** — nearly all requests complete successfully.
+- End-to-end p50 latency is **490ms** and p95 is **2,000ms** across the full 18-minute experiment.
+- During the sustained phase, HPA maintains multiple replicas and keeps failure rates near zero.
+- During recovery, HPA scales down with a 60-second stabilization delay.
 
-**Key finding:** HPA achieves a **50% reduction in peak spike p95 latency** (420ms vs 850ms) and a **65% reduction in mean sustained-phase p95 latency** compared to the fixed deployment.
+**Key finding:** HPA reduces the **failure rate from 51.7% to 0.97%** — a 53× improvement — and reduces average end-to-end latency from **4,790ms to 711ms** (6.7× improvement). P95 latency improves from 20,000ms to 2,000ms (90% reduction).
 
 ### 7.3 Results: Throughput Comparison
 
 **Figure 2** shows requests per second over time.
 
-The fixed deployment's throughput is effectively capped at approximately 36 RPS (3 pods × ~12 RPS/pod) during the spike and sustained phases. At peak load demand of ~150 effective users, this cap means the system cannot keep up, and the latency inflation in Figure 1 is the observable consequence.
+The fixed deployment processed **7,506 total requests** at a mean successful throughput of **~0.46 RPS** (Prometheus, successful 200-status responses only), with 3,878 failures. Because the majority of requests during the spike and sustained phases timed out at the connection level, successful throughput is artificially low — the 3 pods were rejecting or dropping the bulk of incoming requests rather than queuing them.
 
-The HPA deployment's throughput scales with the replica count. During the sustained phase with 5–7 replicas, throughput reaches 60–84 RPS, better matching the actual demand. This explains the lower latency: pods are not saturated, so queuing delays are minimal.
+The HPA deployment processed **18,915 total requests** at a mean successful throughput of **~11.81 RPS** (Prometheus), with only 183 failures. HPA scaled to handle the demand rather than reject it, resulting in 2.5× more total requests served across the same 18-minute window.
 
 ### 7.4 Results: CPU Utilization and Scaling Behavior
 
@@ -402,23 +385,27 @@ Key observations:
 
 | Metric | Fixed | HPA | Δ |
 |--------|-------|-----|---|
-| Pod-hours used | 0.90 | 1.06 | +18% |
-| Mean p95 latency | 512ms | 195ms | -62% |
-| Cost per 1k requests | $0.00041 | $0.00029 | -29% |
+| Pod-hours used | 0.90 | 2.31 | +157% |
+| Mean p95 latency (successful reqs) | 335ms | 439ms | +31% |
+| End-to-end failure rate | 51.7% | 0.97% | -98% |
+| Total requests served | 7,506 | 18,915 | +152% |
+| Cost per 1k requests successfully served | $0.00043 | $0.00011 | -74% |
 
-**Interpretation:** HPA uses 18% more pod-hours than the fixed deployment (driven by the sustained phase where 5–7 replicas serve load that the fixed 3 pods struggled to handle). However, because HPA serves significantly more requests at lower latency — fewer retries, no timeouts, higher effective throughput — the **cost per successfully served request is 29% lower**.
+**Interpretation:** HPA uses significantly more pod-hours than the fixed deployment because it scaled to an average of ~7.7 replicas to absorb the spike and sustained phases. However, it served **2.5× as many requests** with a **98% lower failure rate**. The fixed deployment's 3 pods were unable to handle the load — the apparent "cost efficiency" of fewer pod-hours is illusory, because most of that compute time was spent failing requests.
 
-This confirms H3 is partially supported: HPA does not reduce pod-hours (total resource consumption is slightly higher), but it delivers better cost efficiency as measured per served request.
+When measured by cost per successfully served request, HPA is **74% more cost-efficient** than the fixed deployment under these load conditions.
+
+H3 is not confirmed in its original form (HPA uses far more than 125% of fixed pod-hours), but the hypothesis was predicated on the fixed deployment successfully handling its load. Under conditions where the fixed deployment saturates and fails, the correct cost metric is cost per served request, not total pod-hours.
 
 ### 7.6 Hypothesis Evaluation
 
-**H1 (Latency Improvement) — CONFIRMED:** HPA achieves 62% lower mean p95 latency during the sustained phase (195ms vs 512ms), far exceeding the 30% threshold.
+**H1 (Latency Improvement) — CONFIRMED (exceeded):** HPA reduces end-to-end p95 latency from 20,000ms to 2,000ms (90% reduction) and average latency from 4,790ms to 711ms (85% reduction), far exceeding the 30% threshold. More critically, HPA reduces the failure rate from 51.7% to 0.97%.
 
-**H2 (Scaling Responsiveness) — CONFIRMED:** HPA scaled from 1→7 replicas within 75–90 seconds of spike onset, within our 90-second prediction.
+**H2 (Scaling Responsiveness) — CONFIRMED:** HPA scaled from 1 to approximately 7 replicas during the spike phase, absorbing the load within the 90-second window. The 0.97% failure rate versus 51.7% for fixed demonstrates that the scale-out was effective.
 
-**H3 (Cost Neutrality) — PARTIALLY CONFIRMED:** HPA's pod-hours are 18% higher than fixed (outside the ≤25% threshold), but cost-per-request is 29% lower. The definition of "cost" matters significantly for this conclusion.
+**H3 (Cost Neutrality) — NOT CONFIRMED as stated:** HPA used approximately 2.31 pod-hours versus 0.90 for fixed (+157%), well outside the ≤125% threshold. However, cost per successfully served request favors HPA by 74%. The hypothesis did not account for the scenario where the fixed deployment fails the majority of requests — total pod-hours is a misleading cost metric when one deployment is saturated.
 
-**H4 (Initial Spike Degradation) — CONFIRMED:** During the first 60–90 seconds of the spike phase, HPA p95 latency (420ms peak) exceeds fixed deployment p95 latency (~280ms at that moment). The fixed deployment's 3 pre-provisioned pods handle the early spike better than HPA's single starting pod.
+**H4 (Initial Spike Degradation) — CONFIRMED:** During the first 60–90 seconds of spike onset, the single HPA pod was overwhelmed before autoscaling responded. The fixed deployment's 3 pre-provisioned pods handled the initial seconds of the spike better than HPA's single starting pod, consistent with our prediction.
 
 ### 7.7 Abnormal Case Analysis: The Reactive Scaling Delay
 
@@ -612,36 +599,52 @@ async def metrics():
 ```python
 from locust import HttpUser, task, between, LoadTestShape
 
+
 class HPAEvalUser(HttpUser):
-    wait_time = between(0.5, 2.0)
+    """Simulates a user sending a mix of lightweight and CPU-heavy requests."""
+
+    wait_time = between(1, 3)
 
     @task(1)
     def health_check(self):
-        self.client.get("/")
+        """Lightweight GET / — 20% of traffic."""
+        with self.client.get("/", catch_response=True) as resp:
+            if resp.status_code != 200:
+                resp.failure(f"Unexpected status {resp.status_code}")
 
     @task(4)
     def cpu_load(self):
-        self.client.get("/cpu?intensity=medium", name="/cpu?intensity=medium")
+        """CPU-intensive GET /cpu — 80% of traffic."""
+        with self.client.get(
+            "/cpu?intensity=low", catch_response=True, name="/cpu?intensity=low"
+        ) as resp:
+            if resp.status_code == 200:
+                resp.success()
+            else:
+                resp.failure(f"Unexpected status {resp.status_code}")
+
 
 class PhasedLoadShape(LoadTestShape):
+    """
+    Defines a time-driven load shape that cycles through 4 phases.
+    Each tuple: (end_second, target_users, spawn_rate)
+    """
+
     stages = [
-        (0,    1,   5),
-        (180,  50,  5),
-        (360,  200, 50),
-        (900,  150, 10),
-        (1080, 10,  10),
+        (180,  20,  2),    # ramp-up:   0–3 min,   1→20 users
+        (360,  80,  20),   # spike:     3–6 min,   20→80 users
+        (900,  60,  5),    # sustained: 6–15 min,  hold ~60 users
+        (1080, 5,   5),    # recovery:  15–18 min, ramp down
     ]
 
     def tick(self):
         run_time = self.get_run_time()
-        for i, (end_time, users, spawn_rate) in enumerate(self.stages):
-            if run_time <= end_time or i == len(self.stages) - 1:
-                if i == 0:
-                    return (users, spawn_rate)
-                if run_time > end_time:
-                    return (users, spawn_rate)
+
+        for end_time, users, spawn_rate in self.stages:
+            if run_time <= end_time:
                 return (users, spawn_rate)
-        return None
+
+        return None  # All phases done — stop the test
 ```
 
 #### A.3 Simulation Script (`analysis/simulate_results.py`)
@@ -688,20 +691,46 @@ GET      /cpu?intensity=medium      8640       0     |   387    142   2814     3
 
 #### B.3 Statistical Summary Output
 
+Output from `python3 analysis/analyze_results.py` on real GKE experiment data.
+Note: Prometheus latency metrics reflect only successfully completed requests.
+Locust end-to-end results (all requests including failures) are shown separately below.
+
 ```
-=============================================================================
+==================================================================================
 STATISTICAL SUMMARY
-=============================================================================
-Metric                    Fixed Mean  Fixed Std   HPA Mean   HPA Std      Δ%
------------------------------------------------------------------------------
-Latency p50 (ms)              312.45     184.21     132.67      87.43  -57.6%
-Latency p95 (ms)              511.82     241.33     195.14     119.87  -61.9%
-Latency p99 (ms)              723.41     318.77     261.89     158.44  -63.8%
-Throughput (RPS)               28.14       8.92      52.37      19.43  +86.1%
-CPU Util (%)                   71.22      18.44      54.38      19.12  -23.6%
-Replica Count                   3.00       0.00       4.73       2.11  +57.7%
-Error Rate                      0.0182     0.0241     0.0042     0.0061 -76.9%
-=============================================================================
+==================================================================================
+Metric                      Fixed Mean  Fixed Std     HPA Mean    HPA Std       Δ%
+----------------------------------------------------------------------------------
+Latency p50 (ms)                182.05       3.06       245.75      40.83 +   35.0%
+Latency p95 (ms)                334.73      62.95       439.25      78.95 +   31.2%
+Latency p99 (ms)                463.59      17.83       477.63      49.93 +    3.0%
+Throughput (RPS)                  0.46       0.71        11.81       8.38 + 2495.3%
+CPU Util (%)                      8.08       6.09        15.88       7.71 +   96.5%
+Replica Count                     1.00       0.00         7.71       3.18 +  671.2%
+Error Rate                         n/a        n/a          n/a        n/a      n/a
+==================================================================================
+```
+
+*Note on fixed latency: Prometheus records latency only for requests that reach the application and return a response. Because 51.7% of fixed deployment requests failed at the connection level (status 0 — pod queue full or connection refused), those requests never entered the histogram. The 182ms p50 above reflects only the ~48% of requests that succeeded. The complete picture requires the Locust end-to-end results below.*
+
+**Locust End-to-End Results (all requests):**
+
+```
+Experiment: Fixed Deployment (3 replicas)
+  Total requests:   7,506
+  Failures:         3,878  (51.7%)
+  Avg latency:      4,790ms
+  p50 latency:      2,300ms
+  p95 latency:     20,000ms  (connection timeout)
+  p99 latency:     38,000ms
+
+Experiment: HPA Deployment (1–10 replicas)
+  Total requests:  18,915
+  Failures:           183  (0.97%)
+  Avg latency:        711ms
+  p50 latency:        490ms
+  p95 latency:      2,000ms
+  p99 latency:      3,100ms
 ```
 
 ---

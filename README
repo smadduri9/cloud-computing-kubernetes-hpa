@@ -32,30 +32,45 @@ PREREQUISITES
 
 Directory structure:
 
-  app/                  FastAPI application + Dockerfile
-    main.py             REST API with CPU-intensive /cpu endpoint
-    requirements.txt
-    Dockerfile
+  app/                          The FastAPI server deployed to GKE
+    main.py                       REST API with /cpu, /health, /metrics endpoints
+    requirements.txt              Python deps (fastapi, uvicorn, prometheus_client, psutil)
+    Dockerfile                    Builds the container image (Python 3.11-slim, non-root)
 
-  k8s/                  Kubernetes manifests
-    namespace.yaml
-    deployment-fixed.yaml     3 static replicas (baseline)
-    deployment-hpa.yaml       1 starting replica (HPA manages it)
-    hpa.yaml                  HPA: 1-10 replicas, 60% CPU target
-    service.yaml
-    prometheus/               Prometheus deployment
+  k8s/                          Kubernetes manifests applied to the cluster
+    namespace.yaml                Creates the hpa-eval namespace
+    deployment-fixed.yaml         Fixed 3-replica baseline deployment
+    deployment-hpa.yaml           HPA deployment (starts at 1 replica)
+    hpa.yaml                      HPA config: 1-10 replicas, 60% CPU target
+    service.yaml                  LoadBalancer services for both deployments
+    prometheus/                   Prometheus scraping the app's /metrics endpoint
+      configmap.yaml
+      deployment.yaml
+      service.yaml
 
   locust/
-    locustfile.py       Phased load test: ramp-up/spike/sustained/recovery
+    locustfile.py                 18-min phased load test (ramp->spike->sustained->recovery)
 
   analysis/
-    simulate_results.py Generates synthetic demo data (no cluster needed)
-    collect_metrics.py  Queries real Prometheus, exports CSV
-    analyze_results.py  Statistical analysis + 4 Matplotlib figures
+    simulate_results.py           Generates synthetic CSV data (demo without cluster)
+    collect_metrics.py            Queries live Prometheus, exports CSV
+    analyze_results.py            Reads CSVs -> 4 Matplotlib figures + stats table
 
-  sample_data/          Output CSVs and figures go here
-  scripts/              Deploy and run scripts
-  paper/                Final paper (Sections 1-10)
+  sample_data/                  Experiment output
+    fixed_metrics.csv             Collected from fixed deployment experiment
+    hpa_metrics.csv               Collected from HPA experiment
+    locust_fixed_*.csv            Locust stats from fixed run
+    figures/                      4 PNG charts (latency, throughput, cpu_replicas, cost)
+
+  scripts/
+    deploy_gke.sh                 Full GKE cluster + image build + deploy
+    deploy_local.sh               Minikube version for local demo
+    run_experiment.sh             Runs both experiments back-to-back
+
+  paper/
+    final_paper.md                Complete 10-section research paper
+
+  README                          Setup instructions + all Python code pasted inline
 
 --------------------------------------------------------------------------------
 2. QUICK DEMO (no cluster required)
